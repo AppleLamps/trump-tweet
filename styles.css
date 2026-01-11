@@ -461,12 +461,14 @@ a[aria-disabled="true"]:hover {
     align-items: center;
     gap: 4px;
     margin-bottom: 2px;
+    flex-wrap: wrap;
 }
 
 .tweet-name {
     font-weight: 700;
     font-size: 15px;
     color: var(--text-primary);
+    white-space: nowrap;
 }
 
 .tweet-verified {
@@ -486,6 +488,7 @@ a[aria-disabled="true"]:hover {
 .tweet-date {
     color: var(--text-secondary);
     font-size: 15px;
+    white-space: nowrap;
 }
 
 .tweet-date:hover {
@@ -910,6 +913,34 @@ a[aria-disabled="true"]:hover {
 
     .tweet-actions {
         max-width: 100%;
+    }
+
+    .tweet-header {
+        flex-wrap: nowrap;
+    }
+
+    .tweet-name {
+        flex-shrink: 0;
+    }
+
+    .tweet-username {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+        flex-shrink: 1;
+    }
+
+    .tweet-dot {
+        flex-shrink: 0;
+    }
+
+    .tweet-date {
+        flex-shrink: 0;
+    }
+
+    .tweet-more {
+        flex-shrink: 0;
     }
 }
 
