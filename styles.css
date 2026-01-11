@@ -281,8 +281,9 @@ a[aria-disabled="true"]:hover {
 .name-section {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
-    margin-bottom: 2px;
+    margin-bottom: 12px;
 }
 
 .name-section h1 {
@@ -295,16 +296,13 @@ a[aria-disabled="true"]:hover {
 }
 
 .username {
-    display: block;
     color: var(--text-secondary);
     font-size: 15px;
-    margin-bottom: 12px;
 }
 
 .bio {
     font-size: 15px;
     margin-bottom: 4px;
-    white-space: pre-wrap;
 }
 
 .flag {
