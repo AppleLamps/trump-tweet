@@ -9,6 +9,7 @@ let currentChunk = 0;
 let totalChunks = 0;
 let isLoading = false;
 let isLoadingChunk = false;
+let hasLoadError = false;
 let totalTweetCount = 0;
 
 // Format numbers (e.g., 1500 -> 1.5K)
@@ -25,11 +26,15 @@ function formatNumber(num) {
 // Format date relative to now or as absolute date
 function formatDate(timestamp) {
   const date = new Date(timestamp);
+  const timeValue = date.getTime();
+  if (Number.isNaN(timeValue)) {
+    return "Unknown";
+  }
   const now = new Date();
   const diffMs = now - date;
 
   // Handle invalid or future dates
-  if (diffMs < 0 || isNaN(diffMs)) {
+  if (diffMs < 0 || Number.isNaN(diffMs)) {
     return formatAbsoluteDate(date, now);
   }
 
@@ -52,6 +57,10 @@ function formatDate(timestamp) {
 }
 
 function formatAbsoluteDate(date, now) {
+  const timeValue = date.getTime();
+  if (Number.isNaN(timeValue)) {
+    return "Unknown";
+  }
   const months = [
     "Jan",
     "Feb",
@@ -79,13 +88,27 @@ function formatAbsoluteDate(date, now) {
 
 // Simple hash function for deterministic random values
 function hashCode(str) {
+  if (str == null) {
+    return 0;
+  }
+  const value = String(str);
   let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
+  for (let i = 0; i < value.length; i++) {
+    const char = value.charCodeAt(i);
     hash = (hash << 5) - hash + char;
     hash = hash & hash;
   }
   return Math.abs(hash);
+}
+
+function isValidManifest(manifest) {
+  return (
+    manifest &&
+    Number.isInteger(manifest.totalChunks) &&
+    manifest.totalChunks > 0 &&
+    Number.isInteger(manifest.totalTweets) &&
+    manifest.totalTweets >= 0
+  );
 }
 
 // Sanitize HTML to prevent XSS - whitelist approach
@@ -213,7 +236,7 @@ function createTweetElement(tweet) {
   const retweets = formatNumber(tweet.retweets || 0);
 
   // Use deterministic values based on tweet ID
-  const hash = hashCode(tweet.id);
+  const hash = hashCode(tweet.id ?? tweet.date ?? "");
   const views = formatNumber(
     Math.floor((tweet.favorites || 0) * 15 + (hash % 10000)),
   );
@@ -330,9 +353,32 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function setupPlaceholderLinks() {
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) {
+      return;
+    }
+    const link = event.target.closest('a[href="#"]');
+    if (link) {
+      event.preventDefault();
+    }
+  });
+}
+
+function renderLoadError(message) {
+  const container = document.getElementById("tweets-container");
+  if (container && container.children.length === 0) {
+    container.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: var(--text-secondary);">
+                <p>${escapeHtml(message)}</p>
+            </div>
+        `;
+  }
+}
+
 // Load more tweets from current chunk
 function loadMoreTweets() {
-  if (isLoading) return;
+  if (isLoading || hasLoadError) return;
 
   // Check if we need to load more chunks
   if (currentIndex >= allTweets.length && currentChunk < totalChunks) {
@@ -382,7 +428,7 @@ function loadMoreTweets() {
 
 // Load next chunk of tweets
 async function loadNextChunk() {
-  if (isLoadingChunk || currentChunk >= totalChunks) return;
+  if (isLoadingChunk || currentChunk >= totalChunks || hasLoadError) return;
 
   isLoadingChunk = true;
   const loadingEl = document.getElementById("loading");
@@ -404,14 +450,41 @@ async function loadNextChunk() {
   } catch (error) {
     console.error("Error loading chunk:", error);
     isLoadingChunk = false;
-    loadingEl.classList.add("hidden");
+    hasLoadError = true;
+    updateLoadingText("Failed to load tweets. Please refresh the page.");
+    renderLoadError("Failed to load tweets. Please refresh the page.");
+    cleanup();
   }
 }
 
 // Setup infinite scroll
 let scrollObserver = null;
+let scrollFallbackHandler = null;
 
 function setupInfiniteScroll() {
+  const loadingEl = document.getElementById("loading");
+  if (!loadingEl) {
+    return;
+  }
+
+  if (!("IntersectionObserver" in window)) {
+    const threshold = 400;
+    scrollFallbackHandler = () => {
+      if (hasLoadError || isLoading || isLoadingChunk) {
+        return;
+      }
+      const scrollPosition = window.innerHeight + window.scrollY;
+      const pageHeight = document.documentElement.scrollHeight;
+      if (scrollPosition >= pageHeight - threshold) {
+        loadMoreTweets();
+      }
+    };
+    window.addEventListener("scroll", scrollFallbackHandler, { passive: true });
+    window.addEventListener("resize", scrollFallbackHandler);
+    scrollFallbackHandler();
+    return;
+  }
+
   const options = {
     root: null,
     rootMargin: "400px",
@@ -420,21 +493,30 @@ function setupInfiniteScroll() {
 
   scrollObserver = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
-      if (entry.isIntersecting && !isLoading && !isLoadingChunk) {
+      if (
+        entry.isIntersecting &&
+        !isLoading &&
+        !isLoadingChunk &&
+        !hasLoadError
+      ) {
         loadMoreTweets();
       }
     });
   }, options);
 
-  const loadingEl = document.getElementById("loading");
   scrollObserver.observe(loadingEl);
 }
 
-// Cleanup function for IntersectionObserver
+// Cleanup function for scroll observers
 function cleanup() {
   if (scrollObserver) {
     scrollObserver.disconnect();
     scrollObserver = null;
+  }
+  if (scrollFallbackHandler) {
+    window.removeEventListener("scroll", scrollFallbackHandler);
+    window.removeEventListener("resize", scrollFallbackHandler);
+    scrollFallbackHandler = null;
   }
 }
 
@@ -457,6 +539,7 @@ async function init() {
     const loadingEl = document.getElementById("loading");
     loadingEl.classList.remove("hidden");
     updateLoadingText("Connecting...");
+    setupPlaceholderLinks();
 
     // First, try to load the manifest to see if we have chunked data
     let useChunks = false;
@@ -465,14 +548,20 @@ async function init() {
       const manifestResponse = await fetch("tweets/manifest.json");
       if (manifestResponse.ok) {
         const manifest = await manifestResponse.json();
-        totalChunks = manifest.totalChunks;
-        totalTweetCount = manifest.totalTweets;
-        useChunks = true;
+        if (isValidManifest(manifest)) {
+          totalChunks = manifest.totalChunks;
+          totalTweetCount = manifest.totalTweets;
+          useChunks = true;
 
-        // Update post count immediately
-        const postCountEl = document.querySelector(".post-count");
-        if (postCountEl) {
-          postCountEl.textContent = formatNumber(totalTweetCount) + " posts";
+          // Update post count immediately
+          const postCountEl = document.querySelector(".post-count");
+          if (postCountEl) {
+            postCountEl.textContent = formatNumber(totalTweetCount) + " posts";
+          }
+        } else {
+          console.warn(
+            "Invalid manifest.json, falling back to full tweet file.",
+          );
         }
       }
     } catch (e) {
@@ -522,12 +611,9 @@ async function init() {
     updateLoadingText("");
   } catch (error) {
     console.error("Error loading tweets:", error);
-    const container = document.getElementById("tweets-container");
-    container.innerHTML = `
-            <div style="padding: 20px; text-align: center; color: var(--text-secondary);">
-                <p>Failed to load tweets. Please refresh the page.</p>
-            </div>
-        `;
+    hasLoadError = true;
+    renderLoadError("Failed to load tweets. Please refresh the page.");
+    cleanup();
     document.getElementById("loading").classList.add("hidden");
   }
 }
