@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "SlashCommand(/code-review:code-review)"
+    ]
+  }
+}
