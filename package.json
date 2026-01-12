@@ -1,0 +1,12 @@
+{
+  "name": "trump-tweet",
+  "version": "1.0.0",
+  "description": "Trump Twitter Archive",
+  "scripts": {
+    "build": "echo 'Static site - no build needed'",
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "vercel": "^50.1.6"
+  }
+}

@@ -4,6 +4,7 @@
 const TWEETS_PER_PAGE = 20;
 const CHUNK_SIZE = 5000; // Load tweets in chunks of 5000
 let allTweets = [];
+let displayedTweets = []; // Currently displayed tweets (filtered or all)
 let currentIndex = 0;
 let currentChunk = 0;
 let totalChunks = 0;
@@ -11,6 +12,10 @@ let isLoading = false;
 let isLoadingChunk = false;
 let hasLoadError = false;
 let totalTweetCount = 0;
+let hasFallbackToFullFile = false;
+let searchMode = false;
+let searchQuery = "";
+let searchDebounceTimer = null;
 
 // Format numbers (e.g., 1500 -> 1.5K)
 function formatNumber(num) {
@@ -115,7 +120,8 @@ function isValidManifest(manifest) {
 function sanitizeAndFormatTweet(html) {
   // Create a temporary element to parse HTML
   const temp = document.createElement("div");
-  temp.innerHTML = html;
+  const safeHtml = typeof html === "string" ? html : "";
+  temp.innerHTML = safeHtml;
 
   // Extract text content and rebuild safely
   const result = document.createElement("div");
@@ -226,7 +232,7 @@ function sanitizeAndFormatTweet(html) {
 }
 
 // Create tweet HTML element
-function createTweetElement(tweet) {
+function createTweetElement(tweet, highlightText = "") {
   const tweetEl = document.createElement("article");
   tweetEl.className = "tweet";
 
@@ -298,10 +304,17 @@ function createTweetElement(tweet) {
     `;
   contentDiv.appendChild(headerDiv);
 
-  // Tweet text - sanitized
+  // Tweet text - sanitized and highlighted
   const textDiv = document.createElement("div");
   textDiv.className = "tweet-text";
-  textDiv.innerHTML = sanitizeAndFormatTweet(tweet.text);
+  let tweetHTML = sanitizeAndFormatTweet(tweet.text);
+
+  // Highlight search terms if in search mode
+  if (highlightText && highlightText.trim()) {
+    tweetHTML = highlightSearchTerms(tweetHTML, highlightText);
+  }
+
+  textDiv.innerHTML = tweetHTML;
   contentDiv.appendChild(textDiv);
 
   // Actions
@@ -353,6 +366,209 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Highlight search terms in HTML
+function highlightSearchTerms(html, searchText) {
+  if (!searchText || !searchText.trim()) return html;
+
+  // Create a temporary div to parse HTML
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+
+  // Get all text nodes
+  const walker = document.createTreeWalker(
+    temp,
+    NodeFilter.SHOW_TEXT,
+    null,
+    false
+  );
+
+  const textNodes = [];
+  let node;
+  while (node = walker.nextNode()) {
+    textNodes.push(node);
+  }
+
+  // Escape regex special characters
+  const escapedSearch = searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(${escapedSearch})`, 'gi');
+
+  // Replace text nodes with highlighted version
+  textNodes.forEach(textNode => {
+    const text = textNode.textContent;
+    if (regex.test(text)) {
+      const span = document.createElement('span');
+      span.innerHTML = text.replace(regex, '<span class="search-highlight">$1</span>');
+      textNode.parentNode.replaceChild(span, textNode);
+    }
+  });
+
+  return temp.innerHTML;
+}
+
+// Search through tweets
+function searchTweets(query) {
+  if (!query || !query.trim()) {
+    // Return to normal mode
+    displayedTweets = [];
+    searchMode = false;
+    searchQuery = "";
+    return;
+  }
+
+  searchMode = true;
+  searchQuery = query.toLowerCase().trim();
+
+  // Filter tweets that contain the search query
+  displayedTweets = allTweets.filter(tweet => {
+    if (tweet.isDeleted) return false;
+
+    // Search in the text content
+    const text = tweet.text ? String(tweet.text).toLowerCase() : '';
+    const plainText = text.replace(/<[^>]*>/g, ''); // Strip HTML tags for search
+    return plainText.includes(searchQuery);
+  });
+
+  // Update results count
+  updateSearchResults(displayedTweets.length);
+
+  // Reset index and reload
+  currentIndex = 0;
+  const container = document.getElementById("tweets-container");
+  if (container) {
+    container.innerHTML = "";
+  }
+
+  loadMoreTweets();
+}
+
+// Update search results count
+function updateSearchResults(count) {
+  const resultsCount = document.getElementById("search-results-count");
+  if (resultsCount) {
+    if (count === 0) {
+      resultsCount.textContent = "No results found";
+    } else {
+      resultsCount.textContent = `${formatNumber(count)} ${count === 1 ? 'result' : 'results'} found`;
+    }
+    resultsCount.classList.remove("hidden");
+  }
+}
+
+// Setup tab switching
+function setupTabs() {
+  const postsTab = document.getElementById("tab-posts");
+  const searchTab = document.getElementById("tab-search");
+  const searchPanel = document.getElementById("search-panel");
+  const searchInput = document.getElementById("search-input");
+  const clearSearchBtn = document.getElementById("clear-search");
+  const searchResultsCount = document.getElementById("search-results-count");
+
+  if (!postsTab || !searchTab || !searchPanel || !searchInput) return;
+
+  // Posts tab click
+  postsTab.addEventListener("click", () => {
+    postsTab.classList.add("active");
+    postsTab.setAttribute("aria-selected", "true");
+    searchTab.classList.remove("active");
+    searchTab.setAttribute("aria-selected", "false");
+    searchPanel.classList.add("hidden");
+
+    // Clear search and reset
+    if (searchMode) {
+      searchInput.value = "";
+      searchMode = false;
+      searchQuery = "";
+      displayedTweets = [];
+      currentIndex = 0;
+
+      const container = document.getElementById("tweets-container");
+      if (container) {
+        container.innerHTML = "";
+      }
+
+      loadMoreTweets();
+    }
+  });
+
+  // Search tab click
+  searchTab.addEventListener("click", () => {
+    searchTab.classList.add("active");
+    searchTab.setAttribute("aria-selected", "true");
+    postsTab.classList.remove("active");
+    postsTab.setAttribute("aria-selected", "false");
+    searchPanel.classList.remove("hidden");
+
+    // Focus on search input
+    setTimeout(() => searchInput.focus(), 100);
+  });
+
+  // Search input with debounce
+  searchInput.addEventListener("input", (e) => {
+    const query = e.target.value;
+
+    // Show/hide clear button
+    if (clearSearchBtn) {
+      if (query.trim()) {
+        clearSearchBtn.classList.remove("hidden");
+      } else {
+        clearSearchBtn.classList.add("hidden");
+      }
+    }
+
+    // Debounce search
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+
+    searchDebounceTimer = setTimeout(() => {
+      if (query.trim()) {
+        searchTweets(query);
+      } else {
+        // Reset to all tweets
+        searchMode = false;
+        searchQuery = "";
+        displayedTweets = [];
+        currentIndex = 0;
+
+        if (searchResultsCount) {
+          searchResultsCount.classList.add("hidden");
+        }
+
+        const container = document.getElementById("tweets-container");
+        if (container) {
+          container.innerHTML = "";
+        }
+
+        loadMoreTweets();
+      }
+    }, 300);
+  });
+
+  // Clear search button
+  if (clearSearchBtn) {
+    clearSearchBtn.addEventListener("click", () => {
+      searchInput.value = "";
+      clearSearchBtn.classList.add("hidden");
+      searchMode = false;
+      searchQuery = "";
+      displayedTweets = [];
+      currentIndex = 0;
+
+      if (searchResultsCount) {
+        searchResultsCount.classList.add("hidden");
+      }
+
+      const container = document.getElementById("tweets-container");
+      if (container) {
+        container.innerHTML = "";
+      }
+
+      loadMoreTweets();
+      searchInput.focus();
+    });
+  }
+}
+
 function setupPlaceholderLinks() {
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) {
@@ -367,12 +583,75 @@ function setupPlaceholderLinks() {
 
 function renderLoadError(message) {
   const container = document.getElementById("tweets-container");
-  if (container && container.children.length === 0) {
-    container.innerHTML = `
-            <div style="padding: 20px; text-align: center; color: var(--text-secondary);">
-                <p>${escapeHtml(message)}</p>
-            </div>
-        `;
+  if (!container) {
+    return;
+  }
+
+  let errorEl = document.getElementById("load-error");
+  if (!errorEl) {
+    errorEl = document.createElement("div");
+    errorEl.id = "load-error";
+    errorEl.style.padding = "16px";
+    errorEl.style.margin = "16px";
+    errorEl.style.border = "1px solid var(--border-color)";
+    errorEl.style.borderRadius = "12px";
+    errorEl.style.textAlign = "center";
+    errorEl.style.color = "var(--text-secondary)";
+    errorEl.style.background = "var(--bg-secondary)";
+    container.appendChild(errorEl);
+  }
+  errorEl.textContent = message;
+}
+
+async function loadAllTweetsFallback(reason) {
+  if (hasFallbackToFullFile) {
+    return false;
+  }
+  hasFallbackToFullFile = true;
+  hasLoadError = false;
+  isLoadingChunk = false;
+  currentChunk = 0;
+  totalChunks = 0;
+  currentIndex = 0;
+  allTweets = [];
+
+  const container = document.getElementById("tweets-container");
+  if (container) {
+    container.innerHTML = "";
+  }
+
+  updateLoadingText("Loading tweets...");
+  try {
+    const response = await fetch("trump_tweets.json");
+    if (!response.ok) {
+      throw new Error("Failed to load tweets");
+    }
+
+    updateLoadingText("Processing tweets...");
+    allTweets = await response.json();
+
+    // Sort by date (newest first)
+    allTweets.sort((a, b) => b.date - a.date);
+
+    // Filter out deleted tweets for count
+    const nonDeletedCount = allTweets.filter((t) => !t.isDeleted).length;
+
+    // Update post count in header
+    const postCountEl = document.querySelector(".post-count");
+    if (postCountEl) {
+      postCountEl.textContent = formatNumber(nonDeletedCount) + " posts";
+    }
+
+    updateLoadingText("");
+    loadMoreTweets();
+    return true;
+  } catch (error) {
+    console.error("Fallback load failed:", reason, error);
+    hasLoadError = true;
+    renderLoadError("Failed to load tweets. Please refresh the page.");
+    cleanup();
+    document.getElementById("loading").classList.add("hidden");
+    return false;
   }
 }
 
@@ -380,13 +659,16 @@ function renderLoadError(message) {
 function loadMoreTweets() {
   if (isLoading || hasLoadError) return;
 
-  // Check if we need to load more chunks
-  if (currentIndex >= allTweets.length && currentChunk < totalChunks) {
+  // Determine which tweet array to use
+  const tweetsToDisplay = searchMode ? displayedTweets : allTweets;
+
+  // Check if we need to load more chunks (only when not in search mode)
+  if (!searchMode && currentIndex >= allTweets.length && currentChunk < totalChunks) {
     loadNextChunk();
     return;
   }
 
-  if (currentIndex >= allTweets.length) {
+  if (currentIndex >= tweetsToDisplay.length) {
     document.getElementById("loading").classList.add("hidden");
     return;
   }
@@ -401,14 +683,14 @@ function loadMoreTweets() {
     const fragment = document.createDocumentFragment();
 
     let rendered = 0;
-    const endIndex = Math.min(currentIndex + TWEETS_PER_PAGE, allTweets.length);
+    const endIndex = Math.min(currentIndex + TWEETS_PER_PAGE, tweetsToDisplay.length);
 
     for (let i = currentIndex; i < endIndex; i++) {
-      const tweet = allTweets[i];
+      const tweet = tweetsToDisplay[i];
       // Skip deleted tweets
       if (tweet.isDeleted) continue;
 
-      const tweetEl = createTweetElement(tweet);
+      const tweetEl = createTweetElement(tweet, searchMode ? searchQuery : "");
       fragment.appendChild(tweetEl);
       rendered++;
     }
@@ -417,10 +699,10 @@ function loadMoreTweets() {
     currentIndex = endIndex;
     isLoading = false;
 
-    // Check if we need more chunks
-    if (currentIndex >= allTweets.length && currentChunk < totalChunks) {
+    // Check if we need more chunks (only when not in search mode)
+    if (!searchMode && currentIndex >= allTweets.length && currentChunk < totalChunks) {
       // Don't hide loading, we'll load more chunks
-    } else if (currentIndex >= allTweets.length) {
+    } else if (currentIndex >= tweetsToDisplay.length) {
       loadingEl.classList.add("hidden");
     }
   });
@@ -449,6 +731,12 @@ async function loadNextChunk() {
     loadMoreTweets();
   } catch (error) {
     console.error("Error loading chunk:", error);
+    if (currentChunk === 0) {
+      const fallbackSucceeded = await loadAllTweetsFallback(error);
+      if (fallbackSucceeded) {
+        return;
+      }
+    }
     isLoadingChunk = false;
     hasLoadError = true;
     updateLoadingText("Failed to load tweets. Please refresh the page.");
@@ -540,6 +828,7 @@ async function init() {
     loadingEl.classList.remove("hidden");
     updateLoadingText("Connecting...");
     setupPlaceholderLinks();
+    setupTabs();
 
     // First, try to load the manifest to see if we have chunked data
     let useChunks = false;
