@@ -16,6 +16,8 @@ let hasFallbackToFullFile = false;
 let searchMode = false;
 let searchQuery = "";
 let searchDebounceTimer = null;
+let dateFrom = null;
+let dateTo = null;
 
 // Format numbers (e.g., 1500 -> 1.5K)
 function formatNumber(num) {
@@ -235,6 +237,15 @@ function sanitizeAndFormatTweet(html) {
 function createTweetElement(tweet, highlightText = "") {
   const tweetEl = document.createElement("article");
   tweetEl.className = "tweet";
+  tweetEl.style.cursor = "pointer";
+
+  // Make tweet clickable to open on X
+  const tweetUrl = `https://x.com/realdonaldtrump/status/${tweet.id}`;
+  tweetEl.addEventListener("click", (e) => {
+    // Don't navigate if clicking on a link or button
+    if (e.target.closest("a") || e.target.closest("button")) return;
+    window.open(tweetUrl, "_blank");
+  });
 
   const isRetweet = tweet.isRetweet;
   const date = formatDate(tweet.date);
@@ -405,9 +416,45 @@ function highlightSearchTerms(html, searchText) {
   return temp.innerHTML;
 }
 
+// Load all remaining chunks for search
+let isLoadingAllChunks = false;
+async function loadAllChunksForSearch() {
+  if (isLoadingAllChunks || hasFallbackToFullFile) return;
+  if (currentChunk >= totalChunks) return; // All chunks already loaded
+
+  isLoadingAllChunks = true;
+  updateSearchResults(-1); // Show loading state
+
+  try {
+    // Load remaining chunks
+    while (currentChunk < totalChunks) {
+      const response = await fetch(`tweets/chunk_${currentChunk}.json`);
+      if (!response.ok) {
+        throw new Error(`Failed to load chunk ${currentChunk}`);
+      }
+      const chunkData = await response.json();
+      allTweets = allTweets.concat(chunkData);
+      currentChunk++;
+    }
+
+    // Sort all tweets by date (newest first)
+    allTweets.sort((a, b) => b.date - a.date);
+
+  } catch (error) {
+    console.error("Error loading all chunks:", error);
+    // Try fallback to full file
+    await loadAllTweetsFallback(error);
+  }
+
+  isLoadingAllChunks = false;
+}
+
 // Search through tweets
-function searchTweets(query) {
-  if (!query || !query.trim()) {
+async function searchTweets(query) {
+  const hasQuery = query && query.trim();
+  const hasDateFilter = dateFrom || dateTo;
+
+  if (!hasQuery && !hasDateFilter) {
     // Return to normal mode
     displayedTweets = [];
     searchMode = false;
@@ -416,16 +463,38 @@ function searchTweets(query) {
   }
 
   searchMode = true;
-  searchQuery = query.toLowerCase().trim();
+  searchQuery = hasQuery ? query.toLowerCase().trim() : "";
 
-  // Filter tweets that contain the search query
+  // Load all chunks first if we have any filters and not all chunks are loaded
+  if ((hasQuery || hasDateFilter) && currentChunk < totalChunks && !hasFallbackToFullFile) {
+    await loadAllChunksForSearch();
+  }
+
+  // Filter tweets based on query and/or date range
   displayedTweets = allTweets.filter(tweet => {
     if (tweet.isDeleted) return false;
+    if (tweet.isTS) return false; // Exclude Truth Social posts
 
-    // Search in the text content
-    const text = tweet.text ? String(tweet.text).toLowerCase() : '';
-    const plainText = text.replace(/<[^>]*>/g, ''); // Strip HTML tags for search
-    return plainText.includes(searchQuery);
+    // Date filter
+    if (dateFrom || dateTo) {
+      const tweetDate = new Date(tweet.date);
+      if (dateFrom && tweetDate < dateFrom) return false;
+      if (dateTo) {
+        // Include the entire "to" day
+        const endOfDay = new Date(dateTo);
+        endOfDay.setHours(23, 59, 59, 999);
+        if (tweetDate > endOfDay) return false;
+      }
+    }
+
+    // Text search filter (only if query exists)
+    if (searchQuery) {
+      const text = tweet.text ? String(tweet.text).toLowerCase() : '';
+      const plainText = text.replace(/<[^>]*>/g, ''); // Strip HTML tags for search
+      if (!plainText.includes(searchQuery)) return false;
+    }
+
+    return true;
   });
 
   // Update results count
@@ -441,11 +510,20 @@ function searchTweets(query) {
   loadMoreTweets();
 }
 
+// Apply filters (called when date or search changes)
+async function applyFilters() {
+  const searchInput = document.getElementById("search-input");
+  const query = searchInput ? searchInput.value : "";
+  await searchTweets(query);
+}
+
 // Update search results count
 function updateSearchResults(count) {
   const resultsCount = document.getElementById("search-results-count");
   if (resultsCount) {
-    if (count === 0) {
+    if (count === -1) {
+      resultsCount.textContent = "Loading all tweets...";
+    } else if (count === 0) {
       resultsCount.textContent = "No results found";
     } else {
       resultsCount.textContent = `${formatNumber(count)} ${count === 1 ? 'result' : 'results'} found`;
@@ -462,6 +540,9 @@ function setupTabs() {
   const searchInput = document.getElementById("search-input");
   const clearSearchBtn = document.getElementById("clear-search");
   const searchResultsCount = document.getElementById("search-results-count");
+  const dateFromInput = document.getElementById("date-from");
+  const dateToInput = document.getElementById("date-to");
+  const clearDatesBtn = document.getElementById("clear-dates");
 
   if (!postsTab || !searchTab || !searchPanel || !searchInput) return;
 
@@ -476,10 +557,18 @@ function setupTabs() {
     // Clear search and reset
     if (searchMode) {
       searchInput.value = "";
+      if (dateFromInput) dateFromInput.value = "";
+      if (dateToInput) dateToInput.value = "";
+      dateFrom = null;
+      dateTo = null;
       searchMode = false;
       searchQuery = "";
       displayedTweets = [];
       currentIndex = 0;
+
+      if (searchResultsCount) {
+        searchResultsCount.classList.add("hidden");
+      }
 
       const container = document.getElementById("tweets-container");
       if (container) {
@@ -520,9 +609,9 @@ function setupTabs() {
       clearTimeout(searchDebounceTimer);
     }
 
-    searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = setTimeout(async () => {
       if (query.trim()) {
-        searchTweets(query);
+        await searchTweets(query);
       } else {
         // Reset to all tweets
         searchMode = false;
@@ -549,22 +638,79 @@ function setupTabs() {
     clearSearchBtn.addEventListener("click", () => {
       searchInput.value = "";
       clearSearchBtn.classList.add("hidden");
-      searchMode = false;
-      searchQuery = "";
-      displayedTweets = [];
-      currentIndex = 0;
 
-      if (searchResultsCount) {
-        searchResultsCount.classList.add("hidden");
+      // Keep date filters, just clear text search
+      if (!dateFrom && !dateTo) {
+        searchMode = false;
+        searchQuery = "";
+        displayedTweets = [];
+        currentIndex = 0;
+
+        if (searchResultsCount) {
+          searchResultsCount.classList.add("hidden");
+        }
+
+        const container = document.getElementById("tweets-container");
+        if (container) {
+          container.innerHTML = "";
+        }
+
+        loadMoreTweets();
+      } else {
+        // Reapply with just date filters
+        applyFilters();
       }
-
-      const container = document.getElementById("tweets-container");
-      if (container) {
-        container.innerHTML = "";
-      }
-
-      loadMoreTweets();
       searchInput.focus();
+    });
+  }
+
+  // Date from input
+  if (dateFromInput) {
+    dateFromInput.addEventListener("change", (e) => {
+      const value = e.target.value;
+      dateFrom = value ? new Date(value + "T00:00:00") : null;
+      applyFilters();
+    });
+  }
+
+  // Date to input
+  if (dateToInput) {
+    dateToInput.addEventListener("change", (e) => {
+      const value = e.target.value;
+      dateTo = value ? new Date(value + "T00:00:00") : null;
+      applyFilters();
+    });
+  }
+
+  // Clear dates button
+  if (clearDatesBtn) {
+    clearDatesBtn.addEventListener("click", () => {
+      if (dateFromInput) dateFromInput.value = "";
+      if (dateToInput) dateToInput.value = "";
+      dateFrom = null;
+      dateTo = null;
+
+      // Check if we still have a text search
+      if (!searchInput.value.trim()) {
+        searchMode = false;
+        searchQuery = "";
+        displayedTweets = [];
+        currentIndex = 0;
+
+        if (searchResultsCount) {
+          searchResultsCount.classList.add("hidden");
+        }
+
+        const container = document.getElementById("tweets-container");
+        if (container) {
+          container.innerHTML = "";
+        }
+
+        loadMoreTweets();
+      } else {
+        // Reapply with just text search
+        applyFilters();
+      }
     });
   }
 }
@@ -687,8 +833,9 @@ function loadMoreTweets() {
 
     for (let i = currentIndex; i < endIndex; i++) {
       const tweet = tweetsToDisplay[i];
-      // Skip deleted tweets
+      // Skip deleted tweets and Truth Social posts
       if (tweet.isDeleted) continue;
+      if (tweet.isTS) continue;
 
       const tweetEl = createTweetElement(tweet, searchMode ? searchQuery : "");
       fragment.appendChild(tweetEl);

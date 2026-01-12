@@ -1,4 +1,5 @@
 {
+  "outputDirectory": ".",
   "headers": [
     {
       "source": "/trump_tweets.json",
